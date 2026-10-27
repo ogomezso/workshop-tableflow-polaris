@@ -1,0 +1,55 @@
+# Render with envsubst (needs $POLARIS_ROOT_SECRET). Secret `polaris-azure` (AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET) is created by `make polaris`.
+# Apache Polaris 1.8.0, in-memory persistence: state is lost on restart, so re-run scripts/bootstrap-polaris.sh afterwards.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: polaris
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: polaris-config }
+data:
+  application.properties: |
+    polaris.features."ENABLE_CATALOG_FEDERATION"=true
+    polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES"=["AZURE"]
+---
+apiVersion: v1
+kind: Secret
+metadata: { name: polaris-bootstrap }
+stringData:
+  POLARIS_BOOTSTRAP_CREDENTIALS: "POLARIS,root,${POLARIS_ROOT_SECRET}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: polaris }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: polaris } }
+  template:
+    metadata:
+      labels:
+        app: polaris
+    spec:
+      serviceAccountName: polaris
+      containers:
+      - name: polaris
+        image: apache/polaris:1.8.0
+        ports: [ { containerPort: 8181 }, { containerPort: 8182 } ]
+        envFrom:
+        - secretRef: { name: polaris-bootstrap }
+        - secretRef: { name: polaris-azure }
+        volumeMounts:
+        - name: cfg
+          mountPath: /deployments/config/application.properties
+          subPath: application.properties
+        readinessProbe: { tcpSocket: { port: 8181 }, initialDelaySeconds: 10, periodSeconds: 5 }
+      volumes:
+      - name: cfg
+        configMap: { name: polaris-config }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: polaris }
+spec:
+  selector: { app: polaris }
+  ports: [ { name: api, port: 8181, targetPort: 8181 } ]

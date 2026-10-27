@@ -1,0 +1,64 @@
+# Render with envsubst (needs $MYSQL_CDC_PW). Secret `mysql-secret` is created by `make mysql`.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: mysql-init }
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS shop;
+    USE shop;
+    CREATE TABLE customers (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      name VARCHAR(100) NOT NULL,
+      email VARCHAR(150),
+      city VARCHAR(80),
+      tier VARCHAR(20) DEFAULT 'standard'
+    );
+    INSERT INTO customers (name,email,city,tier) VALUES
+      ('Ana Torres','ana@example.com','Madrid','gold'),
+      ('Luc Martin','luc@example.com','Paris','standard'),
+      ('Eva Kramer','eva@example.com','Berlin','standard'),
+      ('Ravi Patel','ravi@example.com','London','gold'),
+      ('Mia Rossi','mia@example.com','Milan','standard');
+    CREATE USER 'cdc'@'%' IDENTIFIED BY '${MYSQL_CDC_PW}';
+    GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'cdc'@'%';
+    FLUSH PRIVILEGES;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: mysql }
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector: { matchLabels: { app: mysql } }
+  template:
+    metadata: { labels: { app: mysql } }
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        args: ["--server-id=223344","--log-bin=mysql-bin","--binlog-format=ROW","--binlog-row-image=FULL",
+               "--gtid-mode=ON","--enforce-gtid-consistency=ON","--binlog-expire-logs-seconds=259200"]
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom: { secretKeyRef: { name: mysql-secret, key: root } }
+        ports: [ { containerPort: 3306 } ]
+        volumeMounts:
+        - { name: data, mountPath: /var/lib/mysql }
+        - { name: init, mountPath: /docker-entrypoint-initdb.d }
+      volumes:
+      - name: init
+        configMap: { name: mysql-init }
+  volumeClaimTemplates:
+  - metadata: { name: data }
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  type: NodePort
+  selector: { app: mysql }
+  ports: [ { port: 3306, targetPort: 3306, nodePort: 30306 } ]

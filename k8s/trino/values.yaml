@@ -1,0 +1,15 @@
+# Render with envsubst (needs $POLARIS_READER_ID $POLARIS_READER_SECRET) into values.rendered.yaml (git-ignored).
+server:
+  workers: 1
+additionalCatalogs:
+  polaris: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://polaris.polaris.svc.cluster.local:8181/api/catalog
+    iceberg.rest-catalog.warehouse=tableflow
+    iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.credential=${POLARIS_READER_ID}:${POLARIS_READER_SECRET}
+    iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
+    iceberg.rest-catalog.vended-credentials-enabled=true
+    fs.native-azure.enabled=true
+    iceberg.security=read_only

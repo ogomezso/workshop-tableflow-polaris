@@ -1,0 +1,8 @@
+env.sh
+secrets.env
+.polaris-reader.env
+connectors/*.rendered.json
+k8s/trino/values.rendered.yaml
+.venv/
+__pycache__/
+ngrok.yml

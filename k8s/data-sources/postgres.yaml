@@ -1,0 +1,63 @@
+# Render with envsubst (needs $PG_CDC_PW). Secret `pg-secret` is created by `make postgres`.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: pg-init }
+data:
+  init.sql: |
+    CREATE DATABASE shop;
+    \c shop
+    CREATE TABLE public.products (
+      id SERIAL PRIMARY KEY,
+      sku TEXT NOT NULL,
+      name TEXT NOT NULL,
+      price NUMERIC(10,2) NOT NULL,
+      stock INT NOT NULL DEFAULT 0
+    );
+    INSERT INTO public.products (sku,name,price,stock) VALUES
+      ('SKU-A','Widget',9.90,100),('SKU-B','Gadget',24.50,40),
+      ('SKU-C','Gizmo',5.25,500),('SKU-D','Doohickey',99.00,12);
+    CREATE ROLE cdc WITH LOGIN REPLICATION PASSWORD '${PG_CDC_PW}';
+    GRANT CONNECT ON DATABASE shop TO cdc;
+    GRANT USAGE ON SCHEMA public TO cdc;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO cdc;
+    CREATE PUBLICATION dbz_publication FOR TABLE public.products;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16
+        args: ["-c","wal_level=logical","-c","max_wal_senders=10","-c","max_replication_slots=10"]
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom: { secretKeyRef: { name: pg-secret, key: postgres } }
+        - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+        ports: [ { containerPort: 5432 } ]
+        volumeMounts:
+        - { name: data, mountPath: /var/lib/postgresql/data }
+        - { name: init, mountPath: /docker-entrypoint-initdb.d }
+      volumes:
+      - name: init
+        configMap: { name: pg-init }
+  volumeClaimTemplates:
+  - metadata: { name: data }
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  type: NodePort
+  selector: { app: postgres }
+  ports: [ { port: 5432, targetPort: 5432, nodePort: 30432 } ]

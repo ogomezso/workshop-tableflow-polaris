@@ -1,0 +1,32 @@
+# Image producer:v1 is loaded into kind by `make producer-image`. The Secret `confluent-client` is created by `make clients-secret`.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: producer }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: producer } }
+  template:
+    metadata: { labels: { app: producer } }
+    spec:
+      containers:
+      - name: producer
+        image: producer:v1
+        imagePullPolicy: IfNotPresent
+        command: ["python", "producer.py"]
+        envFrom: [ { secretRef: { name: confluent-client } } ]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: consumer }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: consumer } }
+  template:
+    metadata: { labels: { app: consumer } }
+    spec:
+      containers:
+      - name: consumer
+        image: producer:v1
+        imagePullPolicy: IfNotPresent
+        command: ["python", "consumer.py"]
+        envFrom: [ { secretRef: { name: confluent-client } } ]

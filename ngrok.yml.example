@@ -1,0 +1,9 @@
+# Copy to ngrok.yml (git-ignored). Run `ngrok config add-authtoken <token>` once first.
+version: "2"
+tunnels:
+  mysql:
+    proto: tcp
+    addr: 127.0.0.1:13306
+  postgres:
+    proto: tcp
+    addr: 127.0.0.1:15432

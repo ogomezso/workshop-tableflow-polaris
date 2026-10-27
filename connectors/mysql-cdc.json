@@ -1,0 +1,20 @@
+{
+  "name": "mysql-cdc-shop",
+  "connector.class": "MySqlCdcSourceV2",
+  "kafka.auth.mode": "KAFKA_API_KEY",
+  "kafka.api.key": "${KAFKA_KEY}",
+  "kafka.api.secret": "${KAFKA_SECRET}",
+  "database.hostname": "${MYSQL_HOST}",
+  "database.port": "${MYSQL_PORT}",
+  "database.user": "cdc",
+  "database.password": "${MYSQL_CDC_PW}",
+  "database.include.list": "shop",
+  "table.include.list": "shop.customers",
+  "topic.prefix": "mysql",
+  "output.data.format": "AVRO",
+  "output.key.format": "AVRO",
+  "snapshot.mode": "initial",
+  "decimal.handling.mode": "string",
+  "database.ssl.mode": "preferred",
+  "tasks.max": "1"
+}

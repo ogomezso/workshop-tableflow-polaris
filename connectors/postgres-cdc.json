@@ -1,0 +1,21 @@
+{
+  "name": "postgres-cdc-shop",
+  "connector.class": "PostgresCdcSourceV2",
+  "kafka.auth.mode": "KAFKA_API_KEY",
+  "kafka.api.key": "${KAFKA_KEY}",
+  "kafka.api.secret": "${KAFKA_SECRET}",
+  "database.hostname": "${PG_HOST}",
+  "database.port": "${PG_PORT}",
+  "database.user": "cdc",
+  "database.password": "${PG_CDC_PW}",
+  "database.dbname": "shop",
+  "table.include.list": "public.products",
+  "topic.prefix": "pg",
+  "slot.name": "dbz_slot",
+  "publication.name": "dbz_publication",
+  "publication.autocreate.mode": "disabled",
+  "output.data.format": "AVRO",
+  "output.key.format": "AVRO",
+  "decimal.handling.mode": "string",
+  "tasks.max": "1"
+}
