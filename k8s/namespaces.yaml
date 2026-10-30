@@ -8,6 +8,10 @@ metadata: { name: clients }
 ---
 apiVersion: v1
 kind: Namespace
+metadata: { name: connect }
+---
+apiVersion: v1
+kind: Namespace
 metadata: { name: polaris }
 ---
 apiVersion: v1

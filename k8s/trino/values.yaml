@@ -1,15 +1,25 @@
-# Render with envsubst (needs $POLARIS_READER_ID $POLARIS_READER_SECRET) into values.rendered.yaml (git-ignored).
+# Render with envsubst (needs $POLARIS_READER_ID $POLARIS_READER_SECRET $AWS_REGION) into values.rendered.yaml (git-ignored).
+# Single node (coordinator also runs queries) with a small heap so it fits next to Polaris and Connect on a laptop.
 server:
-  workers: 1
+  workers: 0
+coordinator:
+  jvm:
+    maxHeapSize: "2G"
+  config:
+    nodeScheduler:
+      includeCoordinator: true   # workers: 0 alone does not make the coordinator run queries (chart 1.45)
 additionalCatalogs:
   polaris: |
     connector.name=iceberg
     iceberg.catalog.type=rest
     iceberg.rest-catalog.uri=http://polaris.polaris.svc.cluster.local:8181/api/catalog
     iceberg.rest-catalog.warehouse=tableflow
+    iceberg.rest-catalog.view-endpoints-enabled=false
     iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.server-uri=http://polaris.polaris.svc.cluster.local:8181/api/catalog/v1/oauth/tokens
     iceberg.rest-catalog.oauth2.credential=${POLARIS_READER_ID}:${POLARIS_READER_SECRET}
     iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
     iceberg.rest-catalog.vended-credentials-enabled=true
-    fs.native-azure.enabled=true
+    fs.native-s3.enabled=true
+    s3.region=${AWS_REGION}
     iceberg.security=read_only

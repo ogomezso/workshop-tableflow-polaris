@@ -42,6 +42,7 @@ spec:
         - name: MYSQL_ROOT_PASSWORD
           valueFrom: { secretKeyRef: { name: mysql-secret, key: root } }
         ports: [ { containerPort: 3306 } ]
+        readinessProbe: { tcpSocket: { port: 3306 }, initialDelaySeconds: 5, periodSeconds: 5, failureThreshold: 60 }
         volumeMounts:
         - { name: data, mountPath: /var/lib/mysql }
         - { name: init, mountPath: /docker-entrypoint-initdb.d }
@@ -59,6 +60,5 @@ kind: Service
 metadata:
   name: mysql
 spec:
-  type: NodePort
   selector: { app: mysql }
-  ports: [ { port: 3306, targetPort: 3306, nodePort: 30306 } ]
+  ports: [ { port: 3306, targetPort: 3306 } ]

@@ -36,9 +36,17 @@ SKUS = ["SKU-A", "SKU-B", "SKU-C", "SKU-D"]
 RATE = float(os.environ.get("RATE_SECONDS", "1"))
 
 
+delivered = 0
+
+
 def on_delivery(err, msg):
+    global delivered
     if err is not None:
         print(f"delivery failed: {err}", flush=True)
+        return
+    delivered += 1
+    if delivered % 20 == 0:
+        print(f"delivered={delivered} last=partition {msg.partition()} offset {msg.offset()}", flush=True)
 
 
 while True:

@@ -41,6 +41,7 @@ spec:
           valueFrom: { secretKeyRef: { name: pg-secret, key: postgres } }
         - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
         ports: [ { containerPort: 5432 } ]
+        readinessProbe: { tcpSocket: { port: 5432 }, initialDelaySeconds: 5, periodSeconds: 5, failureThreshold: 60 }
         volumeMounts:
         - { name: data, mountPath: /var/lib/postgresql/data }
         - { name: init, mountPath: /docker-entrypoint-initdb.d }
@@ -58,6 +59,5 @@ kind: Service
 metadata:
   name: postgres
 spec:
-  type: NodePort
   selector: { app: postgres }
-  ports: [ { port: 5432, targetPort: 5432, nodePort: 30432 } ]
+  ports: [ { port: 5432, targetPort: 5432 } ]

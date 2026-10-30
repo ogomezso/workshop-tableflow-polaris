@@ -1,0 +1,70 @@
+# Kafka Connect + Debezium (MySQL, PostgreSQL) in kind, producing to Confluent Cloud over outbound TLS: nothing is exposed.
+# Image connect-debezium:v1 is built by `make connect-image`; Secret confluent-client by `make confluent-secret`.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: connect }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: connect } }
+  template:
+    metadata: { labels: { app: connect } }
+    spec:
+      containers:
+      - name: connect
+        image: connect-debezium:v1
+        imagePullPolicy: IfNotPresent
+        ports: [ { containerPort: 8083 } ]
+        readinessProbe: { httpGet: { path: /, port: 8083 }, initialDelaySeconds: 30, periodSeconds: 10, failureThreshold: 30 }
+        env:
+        # These come first: later entries reference them as $(NAME)
+        - { name: KAFKA_BOOTSTRAP, valueFrom: { secretKeyRef: { name: confluent-client, key: KAFKA_BOOTSTRAP } } }
+        - { name: KAFKA_KEY, valueFrom: { secretKeyRef: { name: confluent-client, key: KAFKA_KEY } } }
+        - { name: KAFKA_SECRET, valueFrom: { secretKeyRef: { name: confluent-client, key: KAFKA_SECRET } } }
+        - { name: SR_URL, valueFrom: { secretKeyRef: { name: confluent-client, key: SR_URL } } }
+        - { name: SR_KEY, valueFrom: { secretKeyRef: { name: confluent-client, key: SR_KEY } } }
+        - { name: SR_SECRET, valueFrom: { secretKeyRef: { name: confluent-client, key: SR_SECRET } } }
+        - { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+        - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx1g" }
+        - { name: CONNECT_BOOTSTRAP_SERVERS, value: "$(KAFKA_BOOTSTRAP)" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "$(POD_IP)" }
+        - { name: CONNECT_GROUP_ID, value: connect-debezium }
+        - { name: CONNECT_PLUGIN_PATH, value: "/usr/share/java,/opt/connect-plugins" }
+        # Worker internal topics (Confluent Cloud requires replication factor 3)
+        - { name: CONNECT_CONFIG_STORAGE_TOPIC, value: connect-debezium-configs }
+        - { name: CONNECT_OFFSET_STORAGE_TOPIC, value: connect-debezium-offsets }
+        - { name: CONNECT_STATUS_STORAGE_TOPIC, value: connect-debezium-status }
+        - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "3" }
+        - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR, value: "3" }
+        - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR, value: "3" }
+        - { name: CONNECT_OFFSET_STORAGE_PARTITIONS, value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_PARTITIONS, value: "1" }
+        # Avro + Confluent Schema Registry (Tableflow needs registered schemas)
+        - { name: CONNECT_KEY_CONVERTER, value: io.confluent.connect.avro.AvroConverter }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL, value: "$(SR_URL)" }
+        - { name: CONNECT_KEY_CONVERTER_BASIC_AUTH_CREDENTIALS_SOURCE, value: USER_INFO }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO, value: "$(SR_KEY):$(SR_SECRET)" }
+        - { name: CONNECT_VALUE_CONVERTER, value: io.confluent.connect.avro.AvroConverter }
+        - { name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL, value: "$(SR_URL)" }
+        - { name: CONNECT_VALUE_CONVERTER_BASIC_AUTH_CREDENTIALS_SOURCE, value: USER_INFO }
+        - { name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO, value: "$(SR_KEY):$(SR_SECRET)" }
+        # SASL_SSL to Confluent Cloud: worker, connector producers/consumers and admin client
+        - { name: CONNECT_SECURITY_PROTOCOL, value: SASL_SSL }
+        - { name: CONNECT_SASL_MECHANISM, value: PLAIN }
+        - { name: CONNECT_SASL_JAAS_CONFIG, value: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="$(KAFKA_KEY)" password="$(KAFKA_SECRET)";' }
+        - { name: CONNECT_PRODUCER_SECURITY_PROTOCOL, value: SASL_SSL }
+        - { name: CONNECT_PRODUCER_SASL_MECHANISM, value: PLAIN }
+        - { name: CONNECT_PRODUCER_SASL_JAAS_CONFIG, value: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="$(KAFKA_KEY)" password="$(KAFKA_SECRET)";' }
+        - { name: CONNECT_CONSUMER_SECURITY_PROTOCOL, value: SASL_SSL }
+        - { name: CONNECT_CONSUMER_SASL_MECHANISM, value: PLAIN }
+        - { name: CONNECT_CONSUMER_SASL_JAAS_CONFIG, value: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="$(KAFKA_KEY)" password="$(KAFKA_SECRET)";' }
+        - { name: CONNECT_ADMIN_SECURITY_PROTOCOL, value: SASL_SSL }
+        - { name: CONNECT_ADMIN_SASL_MECHANISM, value: PLAIN }
+        - { name: CONNECT_ADMIN_SASL_JAAS_CONFIG, value: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="$(KAFKA_KEY)" password="$(KAFKA_SECRET)";' }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: connect }
+spec:
+  selector: { app: connect }
+  ports: [ { name: rest, port: 8083, targetPort: 8083 } ]

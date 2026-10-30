@@ -1,4 +1,5 @@
-# Render with envsubst (needs $POLARIS_ROOT_SECRET). Secret `polaris-azure` (AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET) is created by `make polaris`.
+# Render with envsubst (needs $POLARIS_ROOT_SECRET). Secret `polaris-aws` (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION of the
+# IAM user that may assume the read-only role) is created by `make polaris`.
 # Apache Polaris 1.8.0, in-memory persistence: state is lost on restart, so re-run scripts/bootstrap-polaris.sh afterwards.
 apiVersion: v1
 kind: ServiceAccount
@@ -11,7 +12,6 @@ metadata: { name: polaris-config }
 data:
   application.properties: |
     polaris.features."ENABLE_CATALOG_FEDERATION"=true
-    polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES"=["AZURE"]
 ---
 apiVersion: v1
 kind: Secret
@@ -37,7 +37,7 @@ spec:
         ports: [ { containerPort: 8181 }, { containerPort: 8182 } ]
         envFrom:
         - secretRef: { name: polaris-bootstrap }
-        - secretRef: { name: polaris-azure }
+        - secretRef: { name: polaris-aws }
         volumeMounts:
         - name: cfg
           mountPath: /deployments/config/application.properties

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Creates the federated EXTERNAL catalog (-> Tableflow IRC) and a read-only principal in Polaris.
-# Run with: kubectl -n polaris port-forward svc/polaris 8181:8181   (in another terminal)
+# Opens its own port-forward to Polaris if localhost:8181 is not already reachable.
 # Re-run after any Polaris restart (in-memory persistence).
 set -euo pipefail
 source env.sh; source secrets.env
 
 P=${POLARIS_URL:-http://localhost:8181}
+if [[ "$(curl -s -o /dev/null -w '%{http_code}' "$P/api/catalog/v1/oauth/tokens" || true)" == 000 ]]; then
+  kubectl --context "kind-$KIND_CLUSTER" -n polaris port-forward svc/polaris 8181:8181 >/dev/null 2>&1 &
+  trap 'kill $! 2>/dev/null' EXIT
+  for _ in $(seq 1 20); do sleep 1; [[ "$(curl -s -o /dev/null -w '%{http_code}' "$P/api/catalog/v1/oauth/tokens" || true)" != 000 ]] && break; done
+fi
 MGMT="$P/api/management/v1"
 
 ROOT_TOKEN=$(curl -sf -X POST "$P/api/catalog/v1/oauth/tokens" \
@@ -20,7 +25,7 @@ call() { # method path body ; prints status and body on failure, tolerates 409 (
   echo "$1 $2 -> $code"
 }
 
-LOCATION="abfss://${CONTAINER}@${SA}.dfs.core.windows.net/"
+LOCATION="s3://${BUCKET}/"
 
 # Federated catalog. remoteCatalogName must stay unset: Tableflow IRC accepts only an empty prefix.
 call POST /catalogs "$(cat <<JSON
@@ -30,8 +35,9 @@ call POST /catalogs "$(cat <<JSON
     "name": "tableflow",
     "properties": {"default-base-location": "${LOCATION}"},
     "storageConfigInfo": {
-      "storageType": "AZURE",
-      "tenantId": "${TENANT_ID}",
+      "storageType": "S3",
+      "region": "${AWS_REGION}",
+      "roleArn": "${POLARIS_ROLE_ARN}",
       "allowedLocations": ["${LOCATION}"]
     },
     "connectionConfigInfo": {

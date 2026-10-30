@@ -1,9 +1,7 @@
 """Read Tableflow tables through the federated Polaris catalog (needs a port-forward on 8181).
 
-    kubectl -n polaris port-forward svc/polaris 8181:8181 &
-    source .polaris-reader.env
-    pip install "pyiceberg[adlfs]" pandas
-    python scripts/query_polaris.py [table_name]
+    make polaris-forward            # in another terminal
+    make query TABLE=orders_events  # installs pyiceberg into .venv and runs this script
 """
 import os
 import sys
@@ -16,7 +14,7 @@ catalog = RestCatalog(
     warehouse="tableflow",
     credential=f'{os.environ["POLARIS_READER_ID"]}:{os.environ["POLARIS_READER_SECRET"]}',
     scope="PRINCIPAL_ROLE:ALL",
-    **{"header.X-Iceberg-Access-Delegation": "vended-credentials"},
+    **{"header.X-Iceberg-Access-Delegation": "vended-credentials", "s3.region": os.environ.get("AWS_REGION", "")},
 )
 
 namespaces = catalog.list_namespaces()

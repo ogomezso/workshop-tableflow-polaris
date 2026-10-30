@@ -1,4 +1,4 @@
-# Image producer:v1 is loaded into kind by `make producer-image`. The Secret `confluent-client` is created by `make clients-secret`.
+# Image producer:v1 is loaded into kind by `make producer-image`. The Secret `confluent-client` is created by `make confluent-secret`.
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: producer }
