@@ -21,7 +21,7 @@ Sources: Glean (Confluent Confluence, Jira, Slack, docs.confluent.io, GitHub) an
 **Out of scope**
 - Private networking (Tableflow does not support private networking with Polaris or catalog integrations today).
 - Production hardening, HA, an external IdP for Polaris, persistent Polaris storage, Tableflow-to-Polaris push sync (see section 3).
-- Polaris Console UI (no released image; the repo does not deploy it). Polaris REST API + Trino/PyIceberg is the core demo.
+- Polaris Console UI as part of the core demo. It is optional (`make polaris-console`, built from `apache/polaris-tools` at a pinned commit because there is no released image); Polaris REST API + Trino/PyIceberg is the core demo.
 - Fully managed Confluent CDC connectors (see decisions D3 and D9).
 
 ## 2. Target architecture
@@ -80,7 +80,7 @@ Flow: producer -> `orders_events` (append); MySQL/PG -> Debezium (kind) -> `mysq
 | Polaris persistence is in-memory | Catalog, principals and reader credentials lost on pod restart | Re-run `make bootstrap-polaris` after any Polaris restart (then re-run `make trino` if the reader credentials changed). |
 | Table names with dots fail through Polaris | CDC tables invisible | Flink decode to dot-free upsert topics (D9). |
 | Tableflow IRC credential vending is not done for BYOS | Polaris needs its own read access to S3 | `polaris-reader` role with read on the bucket, assumed by Polaris (D5). |
-| Polaris Console has no released image | No UI in the demo | Out of scope; use the Polaris REST API, Trino and PyIceberg. |
+| Polaris Console has no released image and is early stage | The optional UI needs a source build (npm and Red Hat registry access) and its screens were not checked in a browser | Optional (`make polaris-console`); the API tour in BUILD_GUIDE F3 and Trino/PyIceberg cover the demo without it. |
 
 ## 4. Prerequisites
 
@@ -172,7 +172,7 @@ workshop-tableflow-polaris/
     clients/                  # producer + consumer
     connect/                  # Kafka Connect
     data-sources/             # MySQL, PostgreSQL
-    polaris/                  # Polaris 1.8.0
+    polaris/                  # Polaris 1.8.0 (+ optional console.yaml)
     trino/                    # Helm values
   flink/                      # decode DDL/INSERT statements
   scripts/
@@ -181,6 +181,7 @@ workshop-tableflow-polaris/
     02-confluent-storage-access.sh  # provider integration + trust policy
     99-down-aws.sh            # delete bucket and IAM
     bootstrap-polaris.sh      # federated catalog + read-only principal
+    build-console.sh          # optional Polaris UI image (apache/polaris-tools)
     cdc-changes.sh            # demo changes in both databases
     query_polaris.py          # PyIceberg read through Polaris
     lib.sh

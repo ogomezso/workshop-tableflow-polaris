@@ -14,6 +14,7 @@ help:
 	@echo "Part C  : make clients tableflow-orders polaris bootstrap-polaris query TABLE=orders_events"
 	@echo "Part D/E: make mysql postgres connect connectors flink-help tableflow-cdc [TOPICS=mysql_customers]"
 	@echo "Part F  : make trino"
+	@echo "Polaris UI (optional): make polaris-console polaris-console-forward"
 	@echo "Demo    : make demo-changes"
 	@echo "Cleanup : make down-kind down-aws (delete the Confluent resources first, BUILD_GUIDE.md Part H)"
 
@@ -72,6 +73,18 @@ bootstrap-polaris:
 
 .venv:
 	python3 -m venv .venv && .venv/bin/pip install -q "pyiceberg[pyarrow,pandas]"
+
+# Optional Polaris UI (apache/polaris-tools has no released image: built from source, see BUILD_GUIDE.md F3)
+console-image:
+	./scripts/build-console.sh
+
+polaris-console: console-image
+	$(ENV) $(KC) -n polaris apply -f k8s/polaris/console.yaml
+	$(ENV) $(KC) -n polaris rollout status deploy/polaris-console --timeout=180s
+	@echo "Run: make polaris-console-forward   then open http://localhost:8080"
+
+polaris-console-forward:
+	$(ENV) $(KC) -n polaris port-forward svc/polaris-console 8080:8080
 
 # Needs `make polaris-forward` running in another terminal
 query: .venv

@@ -93,6 +93,8 @@ Replace `lkc-xxxxx` with your cluster ID (`echo $CLUSTER_ID`). Quote it in SQL.
 
 **Point:** Polaris federates the Tableflow catalog, checks the principal's privileges, assumes a read-only role and hands Trino short-lived credentials for that one table. Trino read S3 directly; the data never passes through Polaris or Tableflow.
 
+3. Optional, the Polaris UI (needs `make polaris-console` once, see [BUILD_GUIDE.md](BUILD_GUIDE.md) F3): in T2 run `make polaris-console-forward` instead, open http://localhost:8080 and sign in as `root`. Show **Catalogs > tableflow** (type `EXTERNAL`, the S3 role, the connection to Tableflow), the namespace with its three tables, and **Users & Access Control** (principal `engine_reader`, role `reader` with its five read privileges). Open it once before presenting: its screens have not been checked in a browser.
+
 ### Act 4. CDC tables (2 min)
 
 ```sql
@@ -178,7 +180,7 @@ k -n data-sources exec statefulset/postgres -- psql -U postgres -d shop -c "
 BUILD_GUIDE.md        build and operate the environment, step by step
 STATEMENT_OF_WORK.md  scope, decisions, risks, estimates
 Makefile              every step as a target (make help)
-apps/ connect/ k8s/ connectors/ flink/ scripts/    the pieces the guide deploys
+apps/ connect/ k8s/ connectors/ flink/ scripts/    the pieces the guide deploys (k8s/polaris/console.yaml is the optional UI)
 env.sh.example  secrets.env.example               templates (make init creates the real files)
 ```
 

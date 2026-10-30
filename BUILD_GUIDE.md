@@ -380,7 +380,54 @@ Writes must fail (`CREATE TABLE`, `DROP TABLE`): the catalog is read-only by des
 
 ### F3. Optional: Polaris Console UI
 
-The Polaris server is API-only and this repo does not deploy a UI: the Console in `apache/polaris-tools` is early stage with no released image. If you want it, build it from source with an nginx proxy same-origin with Polaris and load it with `kind load docker-image` (see "Appendix D: Optional web UI" in the Polaris federation how-to). The demo does not need it.
+Polaris itself is API-only. The UI is the Polaris Console from `apache/polaris-tools`, an early-stage project with **no released image**, so `make polaris-console` builds it from source (pinned commit, override with `POLARIS_TOOLS_REF`), loads it into kind and deploys it next to Polaris:
+
+```bash
+make polaris-console            # first build: a few minutes (npm packages and UBI images from registry.access.redhat.com)
+make polaris-console-forward    # keep it running
+open http://localhost:8080
+```
+
+How it works: the Console's nginx serves the UI and proxies `/api/` to Polaris inside the cluster (`scripts/build-console.sh` appends that `location` to the project's `nginx.conf`), so the browser talks to one origin and Polaris needs no CORS change. The URLs in `k8s/polaris/console.yaml` are the ones your browser uses (`http://localhost:8080`); if you forward another local port, change them there. The Console keeps no state, so it survives a Polaris restart, but Polaris itself does not (rerun `make bootstrap-polaris`).
+
+**Sign in** with a Polaris client ID and secret (username = client ID, password = secret; scope `PRINCIPAL_ROLE:ALL`):
+
+| Login | Username | Password | What it can do |
+|-------|----------|----------|----------------|
+| Admin | `root` | `POLARIS_ROOT_SECRET` in `secrets.env` | Everything below (member of `service_admin`, which holds `catalog_admin`) |
+| Reader | `POLARIS_READER_ID` in `.polaris-reader.env` | `POLARIS_READER_SECRET` | Namespaces and tables only; the management API refuses `LIST_CATALOGS` |
+
+Do not show the secrets on screen.
+
+**What to look at.** The Console has Home, Catalogs, Connections ("Service Connections") and "Users & Access Control" (names taken from its source). What `make bootstrap-polaris` created, checked through the same API the UI uses:
+
+| Where | You should see |
+|-------|----------------|
+| Catalogs > `tableflow` | Type `EXTERNAL`; storage `S3` in your region with role `polaris-reader-<suffix>` and allowed location `s3://<bucket>/`; connection `ICEBERG_REST` to the Tableflow IRC URL |
+| Inside the catalog | Namespace `lkc-...` with tables `orders_events`, `mysql_customers`, `pg_products` |
+| A table | Location under `s3://<bucket>/...`, the Tableflow metadata columns (`$$topic`, `$$offset`, ...) and one snapshot per Tableflow commit |
+| Users & Access Control | Principals `root` and `engine_reader`; principal roles `service_admin` and `tableflow_reader`; catalog roles `catalog_admin` and `reader` with `NAMESPACE_LIST`, `NAMESPACE_READ_PROPERTIES`, `TABLE_LIST`, `TABLE_READ_PROPERTIES`, `TABLE_READ_DATA` |
+
+Verified: the image builds, the pod runs, `/health` and the UI are served, and the token request, catalog, principal, role, grant, namespace, table and views calls work through the Console's proxy or the Polaris API. **Not verified:** how each screen renders in a browser (the project is early stage); open it once before presenting.
+
+**Without the UI**, the same tour through the API (needs `make polaris-forward`):
+
+```bash
+source env.sh && source secrets.env
+P=http://localhost:8181; M=$P/api/management/v1
+TOKEN=$(curl -s -X POST $P/api/catalog/v1/oauth/tokens -d grant_type=client_credentials \
+  -d client_id=root -d client_secret=$POLARIS_ROOT_SECRET -d scope=PRINCIPAL_ROLE:ALL | jq -r .access_token)
+api() { curl -s -H "Authorization: Bearer $TOKEN" "$@"; }
+api $M/catalogs | jq -c '.catalogs[] | {name, type}'
+api $M/principals | jq -c '[.principals[].name]'
+api $M/principal-roles | jq -c '[.roles[].name]'
+api $M/catalogs/tableflow/catalog-roles | jq -c '[.roles[].name]'
+api $M/catalogs/tableflow/catalog-roles/reader/grants | jq -c '[.grants[].privilege]'
+api $P/api/catalog/v1/tableflow/namespaces | jq -c .namespaces
+api $P/api/catalog/v1/tableflow/namespaces/$CLUSTER_ID/tables | jq -c '[.identifiers[].name]'
+```
+
+Remove it with `kubectl --context kind-$KIND_CLUSTER -n polaris delete -f k8s/polaris/console.yaml` (and `rm -rf .cache` for the source checkout).
 
 ---
 
@@ -450,6 +497,8 @@ Between sessions: the kind cluster survives a Docker restart and keeps database 
 | Flink: "Only a single statement is supported at a time" | Several statements run at once | Run the `CREATE TABLE` and the `INSERT` separately |
 | `mysql_customers` / `pg_products` exist in Polaris but return no rows | First Tableflow commit with data has not happened yet (two empty snapshots) | Wait 5 to 15 minutes and rerun `make query`; confirm the Flink `INSERT` is `RUNNING` and that `confluent kafka topic consume mysql_customers --from-beginning --value-format avro ...` shows rows |
 | `make confluent-storage`: `Invalid principal` for Confluent's role | Confluent's role is not yet valid in your account | The script retries for ~3 minutes; otherwise rerun it |
+| `make polaris-console` fails while building | No access to npm packages or `registry.access.redhat.com` from your network | Check `docker pull registry.access.redhat.com/ubi9/nginx-126` and npm access; use the API tour in F3 meanwhile |
+| Console login fails or the page cannot reach Polaris | The browser is not on `http://localhost:8080` (the URLs are baked into `k8s/polaris/console.yaml`), or `make polaris-console-forward` is not running | Run the forward on 8080, or change the `VITE_*` URLs and `kubectl apply` the manifest again |
 | Polaris returns 401 after a restart | In-memory state lost | `make bootstrap-polaris`, then `make trino` |
 | `aws iam create-access-key` denied or keys forbidden by org policy | Long-lived IAM user keys blocked | Ask for an exception, or run Polaris with temporary credentials (session token) refreshed by hand (verify) |
 | Rows missing right after changes | Tableflow commit interval | Wait for the next commit (a few minutes; low-throughput topics can take up to 15) |
@@ -460,11 +509,11 @@ Between sessions: the kind cluster survives a Docker restart and keeps database 
 ```
 apps/producer/            Dockerfile, producer.py, consumer.py, requirements.txt
 connect/                  Dockerfile: Kafka Connect + Debezium MySQL/PostgreSQL
-k8s/                      namespaces, clients, connect, data-sources, polaris, trino manifests
+k8s/                      namespaces, clients, connect, data-sources, polaris (+ optional console), trino manifests
 connectors/               mysql-cdc.json, postgres-cdc.json (Debezium configs with ${VAR} placeholders)
 flink/                    10_mysql_customers.sql, 20_pg_products.sql
 scripts/                  00-init.sh, 01-aws.sh, 02-confluent-storage-access.sh, 99-down-aws.sh,
-                          bootstrap-polaris.sh, cdc-changes.sh, query_polaris.py, lib.sh
+                          bootstrap-polaris.sh, build-console.sh, cdc-changes.sh, query_polaris.py, lib.sh
 Makefile                  shortcuts for every part (make help)
 env.sh, secrets.env       local variables and secrets (git-ignored; templates: *.example)
 ```

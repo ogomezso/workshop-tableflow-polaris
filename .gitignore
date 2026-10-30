@@ -4,3 +4,4 @@ secrets.env
 k8s/trino/values.rendered.yaml
 .venv/
 __pycache__/
+.cache/
