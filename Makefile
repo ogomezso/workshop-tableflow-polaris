@@ -6,16 +6,16 @@ KC   := kubectl --context kind-$$KIND_CLUSTER
 
 .PHONY: help init aws confluent-storage kind namespaces producer-image connect-image confluent-secret clients \
         polaris polaris-forward bootstrap-polaris mysql postgres connect connectors connectors-status \
-        flink-help tableflow-orders tableflow-cdc trino query demo-changes down-kind down-aws
+        flink-help tableflow-orders tableflow-cdc trino query demo-changes demo-ddl new-source new-source-down down-kind down-aws
 
 help:
 	@echo "Part A  : make init aws kind namespaces"
 	@echo "Part B  : Confluent env/cluster/keys are manual (BUILD_GUIDE.md Part B), then: make confluent-storage"
 	@echo "Part C  : make clients tableflow-orders polaris bootstrap-polaris query TABLE=orders_events"
-	@echo "Part D/E: make mysql postgres connect connectors flink-help tableflow-cdc [TOPICS=mysql_customers]"
+	@echo "Part D/E: make mysql postgres connect connectors flink-help (MySQL only) tableflow-cdc [TOPICS=mysql_customers]"
 	@echo "Part F  : make trino"
 	@echo "Polaris UI (optional): make polaris-console polaris-console-forward"
-	@echo "Demo    : make demo-changes"
+	@echo "Demo    : make demo-changes ; make demo-ddl [COLUMN=category] ; make new-source (live source, then enable Tableflow on pg_stores)"
 	@echo "Cleanup : make down-kind down-aws (delete the Confluent resources first, BUILD_GUIDE.md Part H)"
 
 init:
@@ -44,7 +44,9 @@ connect-image:
 
 # Same Confluent credentials for the client apps and for Kafka Connect
 confluent-secret:
-	$(ENVS) for ns in clients connect; do $(KC) -n $$ns create secret generic confluent-client \
+	$(ENVS) for v in KAFKA_BOOTSTRAP KAFKA_KEY KAFKA_SECRET SR_URL SR_KEY SR_SECRET; do \
+	  case "$${!v}" in ""|*xxxxx*) echo "$$v in secrets.env is empty or still the template value"; exit 1;; esac; done; \
+	for ns in clients connect; do $(KC) -n $$ns create secret generic confluent-client \
 	  --from-literal=KAFKA_BOOTSTRAP=$$KAFKA_BOOTSTRAP --from-literal=KAFKA_KEY=$$KAFKA_KEY --from-literal=KAFKA_SECRET=$$KAFKA_SECRET \
 	  --from-literal=SR_URL=$$SR_URL --from-literal=SR_KEY=$$SR_KEY --from-literal=SR_SECRET=$$SR_SECRET \
 	  --dry-run=client -o yaml | $(KC) apply -f - || exit 1; done
@@ -119,11 +121,12 @@ connectors-status:
 	$(ENV) $(KC) -n connect exec deploy/connect -- curl -s 'http://localhost:8083/connectors?expand=status' | jq
 
 flink-help:
-	@echo "Run the statements in flink/*.sql in the Console Flink workspace (catalog = environment, database = cluster),"
+	@echo "MySQL only: run flink/10_mysql_customers.sql in the Console Flink workspace (catalog = environment, database = cluster), one statement at a time,"
 	@echo "or: confluent flink shell --compute-pool \$$POOL_ID --environment \$$ENV_ID"
-	@echo "Wait for topics mysql_customers and pg_products to exist before 'make tableflow-cdc'."
+	@echo "Postgres needs no Flink: its connector writes the compacted topic pg_products directly."
+	@echo "Wait for topics mysql_customers (Flink) and pg_products (connector) to exist before 'make tableflow-cdc'."
 
-# TOPICS defaults to both decoded topics; e.g. make tableflow-cdc TOPICS=mysql_customers
+# TOPICS defaults to both CDC tables (mysql_customers via Flink, pg_products straight from Debezium); e.g. make tableflow-cdc TOPICS=pg_products
 TOPICS ?= mysql_customers pg_products
 tableflow-cdc:
 	$(ENVS) for t in $(TOPICS); do confluent tableflow topic enable $$t --cluster $$CLUSTER_ID --environment $$ENV_ID \
@@ -138,6 +141,17 @@ trino:
 
 demo-changes:
 	./scripts/cdc-changes.sh
+
+# Schema change on Postgres: adds a nullable column (COLUMN=name, default category) and touches two rows
+demo-ddl:
+	./scripts/ddl-change.sh $(COLUMN)
+
+# Live source: table public.stores + Debezium connector + topic pg_stores (Tableflow is enabled by hand, see the command it prints)
+new-source:
+	./scripts/new-source.sh up
+
+new-source-down:
+	./scripts/new-source.sh down
 
 down-kind:
 	$(ENV) kind delete cluster --name $$KIND_CLUSTER

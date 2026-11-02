@@ -14,9 +14,13 @@
   "tasks.max": "1",
   "decimal.handling.mode": "string",
   "snapshot.mode": "initial",
-  "transforms": "unwrap",
+  "transforms": "unwrap,route",
   "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
   "transforms.unwrap.delete.tombstone.handling.mode": "tombstone",
+  "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+  "transforms.route.regex": "pg\\.public\\.(.*)",
+  "transforms.route.replacement": "pg_$1",
   "topic.creation.default.replication.factor": "3",
-  "topic.creation.default.partitions": "1"
+  "topic.creation.default.partitions": "1",
+  "topic.creation.default.cleanup.policy": "compact"
 }

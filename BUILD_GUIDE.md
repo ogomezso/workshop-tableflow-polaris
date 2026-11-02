@@ -6,7 +6,7 @@ Hands-on, in-order runbook. Companion to `STATEMENT_OF_WORK.md` (scope, risks, e
 
 ```
 MySQL (kind)    --Debezium (kind)--> Kafka --Flink decode--> mysql_customers --\
-Postgres (kind) --Debezium (kind)--> Kafka --Flink decode--> pg_products ------+--> Tableflow (Iceberg)
+Postgres (kind) --Debezium (kind)--> Kafka pg_products (compacted, no Flink) ---+--> Tableflow (Iceberg)
 Producer app (kind) -----------------> Kafka orders_events (append) -----------/        |
                                                                                     S3 bucket
 Trino / PyIceberg --> Apache Polaris (kind, federated, read-only) --> Tableflow IRC ---^ (Polaris reads S3)
@@ -135,7 +135,7 @@ confluent api-key create --resource <lsrc-xxxxx> --description "demo schema regi
 confluent api-key create --resource tableflow --description "demo tableflow"            # -> TF_KEY / TF_SECRET (used by Polaris)
 ```
 
-Each secret is shown once. Put all six values (plus `KAFKA_BOOTSTRAP` and `SR_URL`) in `secrets.env`.
+Each secret is shown once. Put all six values (plus `KAFKA_BOOTSTRAP` and `SR_URL`) in `secrets.env`, replacing every template value (`make confluent-secret` refuses to run while one is empty or still contains `xxxxx`).
 
 ### B3. Flink compute pool
 
@@ -183,6 +183,8 @@ k -n clients logs deploy/producer --tail=3
 The producer prints `delivered=20 ...` every 20 confirmed deliveries (and `delivery failed` on errors); the consumer prints a running total, for example `orders=100 revenue=...`. Check in the Console that `orders_events` has messages and an Avro schema. The same image runs a consumer in a consumer group (`deploy/consumer`) to show regular consumption next to Tableflow.
 
 ### C2. Enable Tableflow (Iceberg, BYOS on S3)
+
+Tableflow needs the value schema in Schema Registry, which the producer registers with its first successful message. Check it first: `confluent schema-registry subject list --environment $ENV_ID` must show `orders_events-value` (if not, fix the producer logs from C1 before going on).
 
 ```bash
 make tableflow-orders
@@ -248,7 +250,7 @@ The result also shows Tableflow's metadata columns (`$$topic`, `$$partition`, `$
 
 ---
 
-## Part D. MySQL CDC (Debezium on kind, Flink decode)
+## Part D. CDC sources (Debezium on kind; MySQL through Flink)
 
 ### D1. Databases
 
@@ -288,9 +290,19 @@ make connectors
 make connectors-status
 ```
 
-`connectors/mysql-cdc.json` and `connectors/postgres-cdc.json` are rendered with `envsubst` in memory (secrets never touch disk) and sent to the Connect REST API. Both use the `ExtractNewRecordState` SMT so each topic carries the flat row (the format the Flink statements in `flink/` expect) and a delete becomes a tombstone. Topic names are `<topic.prefix>.<db>.<table>`: `mysql.shop.customers` and `pg.public.products`. `make connectors` prints only the HTTP status, because the Connect REST API returns the full connector config (it contains the Kafka API secret in the schema-history settings and the database password). Do not paste `curl` output of `/connectors/<name>` anywhere; the configs also live in Connect's config topic, so treat the demo cluster as disposable. Wait 10 to 20 seconds before `make connectors-status`: right after the PUT the worker has not applied the config yet and the answer is `{}`. Both connectors should report `RUNNING`; the first snapshot takes a minute. MySQL also needs the schema-history topic `debezium-schema-history-mysql` (created by `make connectors`, otherwise by Debezium).
+`connectors/mysql-cdc.json` and `connectors/postgres-cdc.json` are rendered with `envsubst` in memory (secrets never touch disk) and sent to the Connect REST API. Both use the `ExtractNewRecordState` SMT so each topic carries the flat row and a delete becomes a tombstone. The two sources then take **different paths on purpose**:
 
-Check in the Console that both topics exist with Avro schemas.
+| | MySQL | Postgres |
+|---|---|---|
+| Topic written by Debezium | `mysql.shop.customers` (default name `<prefix>.<db>.<table>`, plain topic) | `pg_products`: a `RegexRouter` SMT renames `pg.public.products`, and `topic.creation.default.cleanup.policy=compact` makes it an upsert topic |
+| Flink | Decodes into the upsert topic `mysql_customers` (D4) | **None**: Tableflow reads the connector's topic directly (Part E) |
+| New column in the source | Does not reach Tableflow by itself (the Flink statement keeps the schema it was created with) | Flows through automatically (Part E) |
+
+The Postgres path follows the "without Flink" workflow of the Confluent CDC guide: flattened after-state, compacted topic keyed by the primary key, deletes as tombstones.
+
+A **third source** is created on purpose *during the demo*, not during the build: `make new-source` (E2) creates the table `public.stores`, the connector `postgres-stores-cdc-shop` (own slot and publication) and, through it, the compacted topic `pg_stores`. `make postgres` and `make connectors` do not touch it. `make connectors` prints only the HTTP status, because the Connect REST API returns the full connector config (it contains the Kafka API secret in the schema-history settings and the database password). Do not paste `curl` output of `/connectors/<name>` anywhere; the configs also live in Connect's config topic, so treat the demo cluster as disposable. Wait 10 to 20 seconds before `make connectors-status`: right after the PUT the worker has not applied the config yet and the answer is `{}`. Both connectors (`mysql-cdc-shop` and `postgres-cdc-shop`) should report `RUNNING`; the first snapshot takes a minute. MySQL also needs the schema-history topic `debezium-schema-history-mysql` (created by `make connectors`, otherwise by Debezium).
+
+Check in the Console that the topics `mysql.shop.customers` and `pg_products` exist with Avro key and value schemas, and that `pg_products` has `cleanup.policy=compact` (Configuration tab).
 
 ### D4. Flink decode into an upsert topic (clean name, no dots)
 
@@ -309,7 +321,7 @@ SELECT `id`, `name`, `email`, `city`, `tier` FROM `mysql.shop.customers`;
 Rules from the Confluent CDC guidance:
 - The CDC topic appears in Flink automatically (no source DDL). Do not set connector/format/bootstrap options on `CREATE TABLE`.
 - Create the target with `changelog.mode = 'upsert'` **from the start**. It is immutable after the first materialization.
-- Do not enable Tableflow directly on `mysql.shop.customers`: deletes produce tombstones that suspend an append-mode table, and dotted names fail through Polaris.
+- Do not enable Tableflow directly on `mysql.shop.customers`: the topic is not compacted, so Tableflow would use append mode and the delete tombstones would suspend the table; dotted names also fail through Polaris. (Postgres avoids both with the compacted, renamed topic.)
 - Whether deletes reach the Iceberg table through this decode is not confirmed (verify with the delete in `make demo-changes`).
 
 ### D5. Enable Tableflow on the decoded topic
@@ -328,27 +340,60 @@ After the next Tableflow commit (a few minutes) id=2 shows `gold`, Zoe is presen
 
 ---
 
-## Part E. PostgreSQL CDC
+## Part E. PostgreSQL CDC (no Flink, schema changes flow automatically)
 
-The Postgres connector was created in D3. Run `flink/20_pg_products.sql`:
+The Postgres connector was created in D3 and writes `pg_products` itself, so there is nothing to run in Flink. Check the topic first:
 
-```sql
-CREATE TABLE `pg_products` (
-  `id` INT NOT NULL, `sku` STRING, `name` STRING, `price` STRING, `stock` INT,
-  PRIMARY KEY (`id`) NOT ENFORCED
-) WITH ('changelog.mode' = 'upsert');
-
-INSERT INTO `pg_products`
-SELECT `id`, `sku`, `name`, `price`, `stock` FROM `pg.public.products`;
+```bash
+confluent kafka topic describe pg_products --cluster $CLUSTER_ID --environment $ENV_ID     # cleanup.policy=compact
 ```
-
-`price` is a string because of `decimal.handling.mode=string`; cast it in Flink if you want a numeric type.
 
 ```bash
 make tableflow-cdc TOPICS=pg_products
 ```
 
+Tableflow picks the write mode from the topic's `cleanup.policy`: compacted means **upsert**, with the Kafka key (the Debezium key `id`) as the primary key and tombstones as deletes. The mode cannot change while Tableflow is enabled, so the topic must be compacted **before** you enable Tableflow (it is, because the connector creates it that way). `price` is a string because of `decimal.handling.mode=string`.
+
 **Checkpoint E**: `make demo-changes` also changes Postgres; `make query TABLE=pg_products` shows the change after the next commit.
+
+### E1. Schema change without touching the pipeline
+
+```bash
+make demo-ddl                      # ALTER TABLE products ADD COLUMN category TEXT, then UPDATE of two rows
+make query TABLE=pg_products       # after the next Tableflow commit: new column `category`
+```
+
+What happens: Postgres announces the new column with the first row change after the `ALTER` (hence the `UPDATE`), Debezium registers a new version of the `pg_products-value` schema (the new field is optional), and Tableflow sees the new version in Schema Registry and adds the column to the Iceberg table. Polaris caches no Tableflow metadata, so Trino and PyIceberg see the column after that commit with nothing to refresh. Old snapshots stay readable; older rows show `NULL`.
+
+Rules for the column (Tableflow's schema evolution): add **optional** (nullable) columns at the top level, or widen a type (INT to BIGINT). Do **not** add `NOT NULL` columns (a `NOT NULL DEFAULT` column is a required field and Tableflow rejects it), and do not drop, rename, reorder or change the type of a column: Tableflow suspends the table. Use a new column name each time you repeat the demo (`make demo-ddl COLUMN=origin`), because `category` stays in the table and cannot be dropped.
+
+The same `ALTER` on MySQL would **not** reach `mysql_customers`: a Flink statement keeps the schema it had when it was created. That is the trade-off to explain: Flink adds transformation and enrichment, the direct path adds hands-off schema evolution.
+
+Not verified end to end: Tableflow upsert on the Debezium topic (including deletes through tombstones) and the new column reaching Iceberg and Trino with these component versions (Debezium 2.7.4, Avro). If Tableflow suspends the table, check its status message and the schema versions of `pg_products-value` in Schema Registry.
+
+### E2. A new source created live, then Tableflow
+
+One command creates the table, the connector and the topic (about 30 seconds). It does **not** run during the build; you run it in the demo (README Act 2):
+
+```bash
+make new-source
+```
+
+1. `scripts/new-source.sh` applies `k8s/data-sources/stores.sql` to Postgres (table `public.stores` with 3 rows, grant for the `cdc` user and publication `dbz_publication_stores`; idempotent).
+2. It PUTs `connectors/postgres-stores-cdc.json` (slot `dbz_slot_stores`) and waits for the task to be `RUNNING`.
+3. The connector's snapshot creates the compacted topic `pg_stores` (`RegexRouter` + `cleanup.policy=compact`), and the script waits for it.
+
+It prints the last step, which is yours: enable Tableflow on the new topic.
+
+```bash
+confluent tableflow topic enable pg_stores --cluster $CLUSTER_ID --environment $ENV_ID \
+  --storage-type BYOS --provider-integration $PI_ID --bucket-name $BUCKET --table-formats ICEBERG
+# same thing: make tableflow-cdc TOPICS=pg_stores
+```
+
+The table appears in Polaris right away (empty) and gets its rows at the first Tableflow commit, 5 to 15 minutes later, so do this early in the demo and show the result at the end (Act 8).
+
+**Repeating it.** `make new-source-down` removes the connector, slot, publication and table, and prints the Confluent commands (disable Tableflow, delete the topic and the `pg_stores-*` subjects) that you run yourself; wait for Tableflow to finish cleaning up before enabling it again (re-enabling too early can be refused). Debezium keeps offsets per connector name, so the second run needs another name: `CONNECTOR=postgres-stores-cdc-shop2 make new-source`. Not rehearsed end to end.
 
 ---
 
@@ -404,7 +449,7 @@ Do not show the secrets on screen.
 | Where | You should see |
 |-------|----------------|
 | Catalogs > `tableflow` | Type `EXTERNAL`; storage `S3` in your region with role `polaris-reader-<suffix>` and allowed location `s3://<bucket>/`; connection `ICEBERG_REST` to the Tableflow IRC URL |
-| Inside the catalog | Namespace `lkc-...` with tables `orders_events`, `mysql_customers`, `pg_products` |
+| Inside the catalog | Namespace `lkc-...` with tables `orders_events`, `mysql_customers`, `pg_products` (and `pg_stores` after the live step of E2) |
 | A table | Location under `s3://<bucket>/...`, the Tableflow metadata columns (`$$topic`, `$$offset`, ...) and one snapshot per Tableflow commit |
 | Users & Access Control | Principals `root` and `engine_reader`; principal roles `service_admin` and `tableflow_reader`; catalog roles `catalog_admin` and `reader` with `NAMESPACE_LIST`, `NAMESPACE_READ_PROPERTIES`, `TABLE_LIST`, `TABLE_READ_PROPERTIES`, `TABLE_READ_DATA` |
 
@@ -437,13 +482,14 @@ Keep the producer running. Tableflow commits every few minutes, so run `make dem
 
 | # | Show | How |
 |---|------|-----|
-| 1 | The three source types | Console: topics `orders_events`, `mysql.shop.customers`, `pg.public.products`; Debezium in kind (`make connectors-status`); Flink statements |
+| 1 | The three source types | Console: topics `orders_events`, `mysql.shop.customers`, `pg_products`; Debezium in kind (`make connectors-status`); the one Flink statement (MySQL only) |
 | 2 | Tableflow materialization | Console Tableflow tab; the S3 bucket with Iceberg metadata and parquet files |
 | 3 | Polaris catalog | `make polaris-forward` + `make query` (namespaces and tables through the Polaris REST API) |
 | 4 | Query through the open catalog | Trino queries from F2; the engine has no storage credentials, Polaris vends them |
 | 5 | CDC changes | `make demo-changes`; re-query after the commit |
+| 5b | Schema change | `make demo-ddl`; after the commit `pg_products` has the new column in Trino |
 | 6 | Governance | Reader principal can query; `CREATE TABLE`/`DROP TABLE` rejected (406/403) |
-| 7 | New table appears automatically | Enable Tableflow on one more topic and `SHOW TABLES` again: no sync job, no Polaris change |
+| 7 | New table appears automatically | `make new-source`, then the Tableflow command it prints (live, README Act 2) and `SHOW TABLES` again: no sync job, no Polaris change |
 
 ---
 
@@ -453,17 +499,20 @@ Order matters; Confluent side first, otherwise Tableflow can recreate objects in
 
 ```bash
 source env.sh && source secrets.env
-for t in orders_events mysql_customers pg_products; do
+for t in orders_events mysql_customers pg_products pg_stores; do      # pg_stores only exists if you ran make new-source
   confluent tableflow topic disable $t --cluster $CLUSTER_ID --environment $ENV_ID
 done
-confluent flink statement list --environment $ENV_ID                       # delete the two INSERT statements
+confluent flink statement list --environment $ENV_ID                       # delete the MySQL INSERT statement
 confluent flink statement delete <statement-name> --environment $ENV_ID
 confluent provider-integration delete $PI_ID --environment $ENV_ID
 confluent environment delete $ENV_ID                                       # also removes the cluster, topics, schemas, pool
 
 make down-kind                  # deletes the kind cluster (databases, Connect, Polaris, Trino)
+aws sts get-caller-identity     # AWS credentials must be valid, otherwise nothing is deleted (the script stops with an error)
 make down-aws                   # empties and deletes the bucket, deletes the IAM user and roles (asks for confirmation)
 ```
+
+Disabling Tableflow is asynchronous: deleting the provider integration right afterwards can fail with "integration is being used", and deleting the environment removes it anyway. Move `env.sh` and `secrets.env` away only **after** `make down-aws` finished without errors (it needs `env.sh` to know the names to delete); check with `aws s3 ls | grep $BUCKET` and `aws iam list-roles --query 'Roles[].RoleName' | grep $SUFFIX`, which should print nothing.
 
 Also delete the API keys you created (`confluent api-key list`).
 
@@ -478,7 +527,7 @@ Between sessions: the kind cluster survives a Docker restart and keeps database 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `make kind` or image load fails with "content digest ... not found" | `kind load` and Docker's containerd image store | `docker save <image> -o /tmp/i.tar && kind load image-archive /tmp/i.tar --name $KIND_CLUSTER` |
-| Producer fails with `Name or service not known` (value serialization) | `SR_URL` is the private Schema Registry endpoint (`...aws.private.confluent.cloud`) | Use the public "Endpoint URL" (`psrc-...aws.confluent.cloud`), then `make confluent-secret` and `k -n clients rollout restart deploy/producer deploy/consumer` (same for `deploy/connect` in namespace `connect`) |
+| Producer fails with `Name or service not known` (value serialization) | `SR_URL` is still the template value (`psrc-xxxxx`) or the private Schema Registry endpoint (`...aws.private.confluent.cloud`) | Use the public "Endpoint URL" (`psrc-...aws.confluent.cloud`), then `make confluent-secret` and `k -n clients rollout restart deploy/producer deploy/consumer` (same for `deploy/connect` in namespace `connect`) |
 | Pods `Pending` or OOM-killed | Docker has too little RAM | Raise Docker memory to 8 GB or more; if tight, `helm uninstall trino -n query --kube-context kind-$KIND_CLUSTER` while you do not need it |
 | `connect` pod crash-loops | Wrong Confluent credentials/bootstrap, or egress to 9092 blocked | `k -n connect logs deploy/connect`; recheck `secrets.env` and rerun `make connect`; test `nc -vz <bootstrap host> 9092` from your laptop |
 | `curl: (22)` / 4xx from `make connectors` | Connect not ready or bad config | `k -n connect logs deploy/connect`; the error body is printed by the command |
@@ -488,14 +537,18 @@ Between sessions: the kind cluster survives a Docker restart and keeps database 
 | Postgres connector: slot/publication errors | Publication missing or no REPLICATION | Init script runs only on an empty volume; recreate the volume or create them by hand |
 | Tableflow `FAILED`: "Unable to assume the IAM role specified in the provider integration" | Trust policy lacks `sts:TagSession`, or has a wrong principal/external ID, or IAM propagation | Rerun `make confluent-storage` (writes both statements), then disable and re-enable Tableflow on the topic. Compare `aws iam get-role --role-name $TABLEFLOW_ROLE` trust with Console > Provider integrations; wait 1-2 minutes and retry |
 | Tableflow rejects the bucket | Region differs from the cluster | Bucket and cluster must share a region; recreate whichever is wrong |
-| Tableflow `Suspended`: "detected a Kafka record with a null value" | Tableflow enabled directly on a CDC topic | Use the Flink decode topic |
+| `make polaris`: "POLARIS_AWS_ACCESS_KEY_ID is empty" | The access key was not written to `secrets.env`: your editor overwrote the file after `make aws`, or the IAM user already had a key (AWS shows the secret only once) | `aws iam delete-access-key --user-name $POLARIS_USER --access-key-id <id>`, then `make aws` again; keep `secrets.env` closed (or reload it) in the editor while running `make` |
+| Tableflow `FAILED`: "unable to find a value schema for this topic in Schema Registry" | Tableflow was enabled before any schema was registered (for example the producer was failing on a wrong `SR_URL`) | Fix the producer, wait for the subject `<topic>-value` to appear, then `confluent tableflow topic disable <topic> ...`, wait a minute and enable it again |
+| Tableflow `Suspended`: "detected a Kafka record with a null value" | Tableflow enabled on a CDC topic that is not compacted (append mode), such as `mysql.shop.customers` | Use the Flink decode topic, or a compacted topic (Part E) |
+| Tableflow on `pg_products` is in append mode, or `pg_products` is not compacted | The topic already existed (for example from an earlier Flink table) when the connector started, so `topic.creation.default.*` was ignored | Disable Tableflow, delete the topic and its schema subjects, rerun `make connectors`, then enable Tableflow again |
+| Tableflow `Suspended` after `make demo-ddl` | The change was not an optional top-level column (for example `NOT NULL`, a dropped or retyped column) | Tableflow cannot drop columns: disable it, delete the topic and schemas, recreate the connector and enable it again; use nullable columns |
 | "changelog mode ... has been modified since table materialization began" | Mode changed after first materialization | Delete the Tableflow topic and Kafka topic, recreate with the right mode |
-| Table invisible through Polaris, `NoSuchTableException` | Topic name has dots (`server.db.table`) | Use the dot-free decoded topics |
+| Table invisible through Polaris, `NoSuchTableException` | Topic name has dots (`server.db.table`) | Use dot-free topics: the Flink decode (MySQL) or the `RegexRouter` rename (Postgres) |
 | Trino query stays `QUEUED, 0 nodes` | Coordinator does not schedule work on itself | Set `coordinator.config.nodeScheduler.includeCoordinator: true` in `k8s/trino/values.yaml` and rerun `make trino` |
 | Trino `Failed to list views` / `Failed to load view` | Tableflow IRC has no view endpoints | `iceberg.rest-catalog.view-endpoints-enabled=false` in the Trino catalog (already set) |
 | `make connectors-status` prints `{}` | Queried right after the PUT, before the worker applied the config | Wait 10 to 20 seconds and repeat |
 | Flink: "Only a single statement is supported at a time" | Several statements run at once | Run the `CREATE TABLE` and the `INSERT` separately |
-| `mysql_customers` / `pg_products` exist in Polaris but return no rows | First Tableflow commit with data has not happened yet (two empty snapshots) | Wait 5 to 15 minutes and rerun `make query`; confirm the Flink `INSERT` is `RUNNING` and that `confluent kafka topic consume mysql_customers --from-beginning --value-format avro ...` shows rows |
+| `mysql_customers` / `pg_products` exist in Polaris but return no rows | First Tableflow commit with data has not happened yet (two empty snapshots) | Wait 5 to 15 minutes and rerun `make query`; for MySQL confirm the Flink `INSERT` is `RUNNING`; in both cases `confluent kafka topic consume <topic> --from-beginning --value-format avro ...` should show rows |
 | `make confluent-storage`: `Invalid principal` for Confluent's role | Confluent's role is not yet valid in your account | The script retries for ~3 minutes; otherwise rerun it |
 | `make polaris-console` fails while building | No access to npm packages or `registry.access.redhat.com` from your network | Check `docker pull registry.access.redhat.com/ubi9/nginx-126` and npm access; use the API tour in F3 meanwhile |
 | Console login fails or the page cannot reach Polaris | The browser is not on `http://localhost:8080` (the URLs are baked into `k8s/polaris/console.yaml`), or `make polaris-console-forward` is not running | Run the forward on 8080, or change the `VITE_*` URLs and `kubectl apply` the manifest again |
@@ -510,10 +563,10 @@ Between sessions: the kind cluster survives a Docker restart and keeps database 
 apps/producer/            Dockerfile, producer.py, consumer.py, requirements.txt
 connect/                  Dockerfile: Kafka Connect + Debezium MySQL/PostgreSQL
 k8s/                      namespaces, clients, connect, data-sources, polaris (+ optional console), trino manifests
-connectors/               mysql-cdc.json, postgres-cdc.json (Debezium configs with ${VAR} placeholders)
-flink/                    10_mysql_customers.sql, 20_pg_products.sql
+connectors/               mysql-cdc.json, postgres-cdc.json, postgres-stores-cdc.json (Debezium configs with ${VAR} placeholders)
+flink/                    10_mysql_customers.sql (MySQL only; Postgres needs no Flink)
 scripts/                  00-init.sh, 01-aws.sh, 02-confluent-storage-access.sh, 99-down-aws.sh,
-                          bootstrap-polaris.sh, build-console.sh, cdc-changes.sh, query_polaris.py, lib.sh
+                          bootstrap-polaris.sh, build-console.sh, cdc-changes.sh, ddl-change.sh, new-source.sh, query_polaris.py, lib.sh
 Makefile                  shortcuts for every part (make help)
 env.sh, secrets.env       local variables and secrets (git-ignored; templates: *.example)
 ```

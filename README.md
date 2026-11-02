@@ -7,7 +7,7 @@ This README is the script for **running the demo** (about 15 minutes). To **buil
 ```
  producer app ------------------------------> orders_events  ------------------.
  MySQL  --Debezium--> mysql.shop.customers --Flink--> mysql_customers ----------+--> Tableflow --> Iceberg in S3
- Postgres --Debezium--> pg.public.products --Flink--> pg_products --------------'                      ^
+ Postgres --Debezium--> pg_products (compacted, no Flink) -----------------------'                      ^
                                                                                                        | vended, short-lived,
  Trino / PyIceberg --> Apache Polaris (read-only, federated) --> Tableflow Iceberg REST Catalog         | table-scoped S3 credentials
                           '--------------- assumes a read-only IAM role -------------------------------'
@@ -24,7 +24,7 @@ Everything except Confluent Cloud (on AWS) and the S3 bucket runs in a local kin
 
 ## Before you go live (30 minutes)
 
-Requirements: the environment is built ([BUILD_GUIDE.md](BUILD_GUIDE.md)) and the Debezium connectors, Flink statements and Tableflow topics are running.
+Requirements: the environment is built ([BUILD_GUIDE.md](BUILD_GUIDE.md)) and the Debezium connectors, the MySQL Flink statement and the Tableflow topics are running.
 
 Terminal layout: **T1** commands, **T2** `make polaris-forward` (leave it running). Browser tabs: Confluent Console (topics, Tableflow, Flink) and, optionally, the S3 bucket.
 
@@ -33,14 +33,14 @@ source env.sh && source secrets.env
 alias k="kubectl --context kind-$KIND_CLUSTER"
 
 k get pods -A | grep -vE "Running|Completed"                         # only the header line
-make connectors-status                                               # mysql-cdc-shop and postgres-cdc-shop: RUNNING
-confluent tableflow topic list --cluster $CLUSTER_ID --environment $ENV_ID    # three topics, Phase RUNNING
+make connectors-status                                               # mysql-cdc-shop and postgres-cdc-shop: RUNNING (no postgres-stores-cdc-shop yet)
+confluent tableflow topic list --cluster $CLUSTER_ID --environment $ENV_ID    # three topics, Phase RUNNING; `pg_stores` must not exist yet (you create and enable it live in Act 2)
 make polaris-forward                                                 # T2
 make query TABLE=orders_events                                       # T1: prints rows
 k -n query exec deploy/trino-coordinator -- trino --catalog polaris --execute 'SHOW TABLES FROM "'$CLUSTER_ID'"'
 ```
 
-You should see `mysql_customers`, `orders_events` and `pg_products`. In the Console, check that both Flink `INSERT` statements are `RUNNING`.
+You should see `mysql_customers`, `orders_events` and `pg_products`. In the Console, check that the Flink `INSERT` (MySQL) is `RUNNING`.
 
 - **Polaris keeps its state in memory.** If its pod restarted since the last check, run `make bootstrap-polaris` and `make trino` first (new reader credentials).
 - **Rehearse once end to end**, including the changes in Act 6, because the Tableflow commit interval decides how long you wait there.
@@ -55,9 +55,9 @@ Replace `lkc-xxxxx` with your cluster ID (`echo $CLUSTER_ID`). Quote it in SQL.
 **Say:** "Three sources, nothing special: an application writing events, and two operational databases."
 
 **Show**
-- Console > Topics: `orders_events` (app events), `mysql.shop.customers` and `pg.public.products` (database changes).
+- Console > Topics: `orders_events` (app events), `mysql.shop.customers`, and `pg_products` (database changes). `pg_stores` does not exist yet: you create it in Act 2.
 - `k -n clients logs deploy/consumer --tail=3` shows the live order totals; `make connectors-status` shows the two CDC connectors running in the cluster (self-managed Debezium; they only make outbound connections).
-- Console > Flink: two statements turn the raw CDC topics into clean upsert topics `mysql_customers` and `pg_products`.
+- Console > Flink: one statement turns the raw MySQL topic into the clean upsert topic `mysql_customers`. Postgres needs none: its connector writes the compacted topic `pg_products` directly (Console > `pg_products` > Configuration: `cleanup.policy=compact`).
 
 **Point:** the customer keeps writing to Kafka exactly as today.
 
@@ -69,6 +69,21 @@ Replace `lkc-xxxxx` with your cluster ID (`echo $CLUSTER_ID`). Quote it in SQL.
 - Console > topic `orders_events` > Tableflow: storage is the customer's bucket, format Iceberg, status running.
 - `aws s3 ls s3://$BUCKET --recursive | head`: Iceberg metadata and parquet files in the customer's own bucket.
 - `make query TABLE=orders_events` prints the snapshot count (`... : N snapshots`) before the rows. Each Tableflow commit is a new Iceberg snapshot, so the number grows between runs.
+
+**Live: a new source, then Tableflow.** Say "a team launches a new service with its own table; let's bring it in", then:
+
+```bash
+make new-source        # new Postgres table + Debezium connector + topic pg_stores, about 30 s
+```
+
+Show the new topic in the Console (Topics > `pg_stores`), then switch it on with the command the script prints:
+
+```bash
+confluent tableflow topic enable pg_stores --cluster $CLUSTER_ID --environment $ENV_ID \
+  --storage-type BYOS --provider-integration $PI_ID --bucket-name $BUCKET --table-formats ICEBERG
+```
+
+The first commit with rows takes 5 to 15 minutes, so **do this early** and come back to it in Act 8. Nothing of this exists before the demo (see the pre-flight list).
 
 **Point:** open format, customer-owned storage. Events use append mode, the CDC topics use upsert.
 
@@ -102,7 +117,7 @@ SELECT * FROM "lkc-xxxxx".mysql_customers ORDER BY id;
 SELECT * FROM "lkc-xxxxx".pg_products ORDER BY id;
 ```
 
-**Point:** two operational databases, now queryable tables in the same catalog, kept in sync by upsert. `price` is a string because the connectors send decimals as text.
+**Point:** two operational databases, now queryable tables in the same catalog, kept in sync by upsert. Two paths on purpose: MySQL goes through Flink (room for transformation), Postgres goes straight from Debezium to Tableflow. `price` is a string because the connectors send decimals as text.
 
 ### Act 5. Governance (1 min)
 
@@ -126,15 +141,33 @@ Expected: `Access Denied: Cannot create table`.
 2. Go on with Act 7 while Tableflow commits (a few minutes; the first commit with rows on a quiet topic can take longer).
 3. Re-run the two CDC queries from Act 4 and the order query from Act 3. Orders keep growing because the producer is still running.
 
-**Point:** changes flow from the database to the table with no job to schedule. **Rehearse the delete:** that a delete reaches the Iceberg table through the Flink upsert decode is not yet confirmed. If it does not, present updates and inserts, and say so.
+**Point:** changes flow from the database to the table with no job to schedule. **Rehearse the delete:** that a delete reaches the Iceberg table (through the Flink upsert for MySQL, through the tombstone for Postgres) is not yet confirmed. If it does not, present updates and inserts, and say so.
 
 If you cannot wait: run `make demo-changes` 15 minutes before the demo and treat this act as "here is the result".
 
-### Act 7. Close (1 min)
+### Act 7. A schema change (3 min)
 
-**Say:** "A new topic with Tableflow enabled shows up in Polaris with no extra step, and any engine that speaks the Iceberg REST API can use it: Trino here, Spark, Flink or Snowflake elsewhere."
+**Say:** "A team adds a column to its table. Nobody updates the pipeline."
 
-Optional, not rehearsed: create a topic, point the producer at it (`k -n clients set env deploy/producer TOPIC=<new topic>`), enable Tableflow (`confluent tableflow topic enable <topic> --cluster $CLUSTER_ID --environment $ENV_ID --storage-type BYOS --provider-integration $PI_ID --bucket-name $BUCKET --table-formats ICEBERG`) and run `SHOW TABLES` again after the first commit.
+1. Run the change (T1):
+   ```bash
+   make demo-ddl
+   ```
+   It runs `ALTER TABLE products ADD COLUMN category TEXT` on Postgres and updates two rows (Postgres announces a new column with the next row change).
+2. After the next Tableflow commit, re-run the Postgres query from Act 4 in Trino: `SELECT * FROM "lkc-xxxxx".pg_products ORDER BY id;`. The new `category` column is there, `tools` for SKU-A and SKU-B and `NULL` for the rest. Polaris needed no refresh.
+
+**Point:** Debezium registers the new schema version, Tableflow adds the column to the Iceberg table, and Polaris serves the new schema right away. **Be honest about the edges:** only optional columns can be added (drop, rename, reorder and `NOT NULL` columns are rejected), and the MySQL path through Flink would not pick the column up by itself, because a Flink statement keeps the schema it was created with. That is the trade-off between the two paths. Repeating the act needs a new column name (`make demo-ddl COLUMN=origin`); to start over, rebuild the `pg_products` table (see Reset). **Not rehearsed yet: do it once before presenting.**
+
+### Act 8. Close (1 min)
+
+**Say:** "The topic we switched on at the start is now a table in Polaris. Nobody registered it or ran a sync job, and any engine that speaks the Iceberg REST API can use it: Trino here, Spark, Flink or Snowflake elsewhere."
+
+```sql
+SHOW TABLES FROM "lkc-xxxxx";                              -- pg_stores is listed (it appeared right after the switch, empty)
+SELECT * FROM "lkc-xxxxx".pg_stores ORDER BY id;           -- 3 stores once the first commit is done
+```
+
+If the rows are not there yet, show that the table exists and say the first commit is still pending. Not rehearsed end to end for `pg_stores`.
 
 ## Likely questions
 
@@ -147,6 +180,7 @@ Optional, not rehearsed: create a topic, point the producer at it (`k -n clients
 | Why not Tableflow's push sync to Polaris? | It is not available for open-source Polaris yet (INIT-10332). Federation is what works today. |
 | Does it work with private networking? | Not today with Polaris or catalog integrations. |
 | Does it need Confluent-managed storage? | The reverse: Polaris federation needs your own bucket (BYOS). Confluent-managed storage cannot be read through Polaris. |
+| Can the commit latency be lowered? | Not today: Tableflow publishes about every 5 minutes (sooner when a topic accumulates enough data) and has no customer-facing setting for commit frequency. A configurable freshness feature is planned (not available). Show the Kafka side right away and the table after the commit. |
 | Why self-managed Debezium here? | The demo databases live in a laptop cluster that Confluent Cloud cannot reach. With databases reachable from Confluent Cloud, the fully managed CDC connectors are the usual choice. |
 
 ## When something goes wrong during the demo
@@ -162,7 +196,11 @@ More cases and fixes: [BUILD_GUIDE.md](BUILD_GUIDE.md), Appendix A.
 
 ## Reset between runs
 
-`make demo-changes` is cumulative. To restore the sample data (Tableflow picks the changes up on its next commit):
+`make demo-changes` is cumulative. A column added by `make demo-ddl` cannot be removed from the Iceberg table (Tableflow does not drop columns): either use a new `COLUMN=` name for the next run, or rebuild the Postgres table: disable Tableflow on `pg_products`, delete the topic and its schemas, `ALTER TABLE products DROP COLUMN category`, rerun `make connectors` and enable Tableflow again.
+
+**The live source** (`make new-source`) is a one-shot too. To repeat Act 2 and Act 8: `make new-source-down`, run the Confluent commands it prints (disable Tableflow, delete the topic and its schemas), wait until Tableflow has finished cleaning up (re-enabling too early can be refused) and run `CONNECTOR=postgres-stores-cdc-shop2 make new-source` (a new connector name, because Debezium keeps offsets per name).
+
+To restore the sample data (Tableflow picks the changes up on its next commit):
 
 ```bash
 source env.sh && source secrets.env
