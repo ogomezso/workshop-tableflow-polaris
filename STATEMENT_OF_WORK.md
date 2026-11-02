@@ -2,7 +2,7 @@
 
 Demo: Kafka clients, MySQL CDC and PostgreSQL CDC (both captured by self-managed Debezium on a local kind cluster) feed Confluent Cloud on AWS. Tableflow materializes Iceberg tables in one S3 bucket. A self-hosted Apache Polaris running in kind federates to the Tableflow Iceberg REST Catalog (IRC) and serves the tables to query engines (Trino, PyIceberg).
 
-Sources: Glean (Confluent Confluence, Jira, Slack, docs.confluent.io, GitHub) and the implemented repo (Makefile, scripts, k8s manifests). Items marked **(verify)** come from general knowledge, not Glean or a tested run. Validated in a real run on 2026-10-30 (AWS `eu-west-1`): AWS and kind setup, provider integration and Tableflow on S3, Polaris federation, PyIceberg and Trino reads through Polaris with vended credentials, Debezium MySQL/PostgreSQL snapshots, Flink decode, and Tableflow on the decoded topics. Not yet validated: UPDATE/DELETE propagation (section 10, item 5).
+Sources: Glean (Confluent Confluence, Jira, Slack, docs.confluent.io, GitHub) and the implemented repo (Makefile, scripts, k8s manifests). Items marked **(verify)** come from general knowledge, not Glean or a tested run. Validated in a real run on 2026-10-30 (AWS `eu-west-1`): AWS and kind setup, provider integration and Tableflow on S3, Polaris federation, PyIceberg and Trino reads through Polaris with vended credentials, Debezium MySQL/PostgreSQL snapshots, Flink decode, and Tableflow on the decoded topics. Validated in a manual rehearsal on 2026-11-02: UPDATE and DELETE propagation for MySQL (Flink) and Postgres (direct), the schema change (`make demo-ddl`) and the live source with Tableflow (`make new-source`), each visible within 5 to 10 minutes (section 10, items 5 and 8).
 
 ---
 
@@ -146,14 +146,14 @@ Effort is for one engineer who knows Confluent Cloud and Kubernetes. Total about
 3. Flink (`make flink-help`): run `flink/10_mysql_customers.sql` to decode `mysql.shop.customers` into the upsert topic `mysql_customers`. Postgres needs no Flink: the connector writes the compacted topic `pg_products`.
 4. `make tableflow-cdc`: enable Tableflow (Iceberg, BYOS) on `mysql_customers` and `pg_products`.
 
-**Acceptance**: three Tableflow topics `RUNNING`; tables visible through Polaris; a delete in MySQL and in Postgres disappears from the table **(verify delete handling: Flink upsert for MySQL, tombstone on the compacted topic for Postgres)**.
+**Acceptance**: three Tableflow topics `RUNNING`; tables visible through Polaris; a delete in MySQL and in Postgres disappears from the table (validated in rehearsal, 2026-11-02: Flink upsert for MySQL, tombstone on the compacted topic for Postgres).
 
 ### Phase 6: Query engine and demo scenarios (1 day)
 
 1. `make trino`: Trino Helm release with the Iceberg REST connector pointing at Polaris (`vended-credentials-enabled`, native S3, `iceberg.security=read_only`, view endpoints off, coordinator schedules work); PyIceberg (`make query`) as fallback. Quote cluster-ID namespaces.
 2. Prepare demo scenarios (section 7) and validate each end to end (`make demo-changes`).
 
-**Acceptance**: each scenario runs in under 2 minutes and data freshness is visible within the Tableflow commit interval (a few minutes; the first commit with rows on a low-volume topic can take up to ~15).
+**Acceptance**: each scenario runs in under 2 minutes and data freshness is visible within the Tableflow commit interval (5 to 10 minutes in rehearsal; the first commit with rows on a low-volume topic can take up to ~15).
 
 ### Phase 7: Automation polish, docs and teardown (1 day)
 
@@ -203,7 +203,7 @@ workshop-tableflow-polaris/
 5. **Governance**: read-only principal can query but create/drop is rejected; one catalog, many engines.
 6. **Freshness**: generate load, re-query after the Tableflow commit.
 7. **New source and Tableflow live**: `make new-source` creates a Postgres table, a third Debezium connector and the topic `pg_stores`; then `confluent tableflow topic enable pg_stores ...`; the table appears in Polaris with no extra step.
-8. **Schema change**: `make demo-ddl` adds a nullable column to Postgres `products`; after the next commit `pg_products` has it, in Polaris and Trino with no pipeline change **(verify)**. On the MySQL/Flink path the same change would not flow.
+8. **Schema change**: `make demo-ddl` adds a nullable column to Postgres `products`; after the next commit `pg_products` has it, in Polaris and Trino with no pipeline change (validated in rehearsal). On the MySQL/Flink path the same change would not flow.
 
 ## 8. Cost and housekeeping
 
@@ -235,13 +235,13 @@ workshop-tableflow-polaris/
 
 ## 10. Validation status and open items
 
-Validated on 2026-10-30: items 1 to 4 and 6 below. Still open: items 5, 7 and 8 (the Postgres no-Flink path was added afterwards).
+Validated on 2026-10-30: items 1 to 4 and 6 below. Validated in a manual rehearsal on 2026-11-02: items 5 and 8. Still open: item 7. Not rehearsed: `make new-source-down` and a repeat of the live source with a second connector name (D14).
 
 1. Polaris reading S3 with a role assumed by an IAM user (access key in a Kubernetes secret) and vending table-scoped credentials to engines. **Validated** (PyIceberg and Trino).
 2. Exact Tableflow trust policy shape for `tableflow-role`. **Validated**: `sts:AssumeRole` with the external ID condition plus `sts:TagSession`.
 3. Trino vended credentials with native S3 through the Iceberg REST connector. **Validated** with the two settings listed in D13.
 4. Debezium schema-history topic with Confluent Cloud SASL_SSL (`schema.history.internal.producer.*` / `consumer.*` prefixes). **Validated**: both connectors `RUNNING`, MySQL snapshot completed and streaming the binlog.
-5. Delete handling: MySQL deletes through the Flink upsert decode and Postgres deletes as tombstones on the compacted topic, into the Iceberg tables **(verify)**.
+5. Delete handling: MySQL deletes through the Flink upsert decode and Postgres deletes as tombstones on the compacted topic, into the Iceberg tables. **Validated** in a manual rehearsal on 2026-11-02.
 6. Tableflow availability in the chosen AWS region and whether org policy allows the IAM user key. **Validated** in `eu-west-1`; confirm again for any other region or account.
 7. Status and date of INIT-10332 (Polaris push sync): if shipped, add a second, push-based catalog to the demo.
-8. Postgres without Flink: Tableflow upsert on the Debezium topic (compacted, `RegexRouter` rename, Debezium 2.7.4 Avro) and an added optional column reaching Iceberg and Trino **(verify)**.
+8. Postgres without Flink: Tableflow upsert on the Debezium topic (compacted, `RegexRouter` rename, Debezium 2.7.4 Avro) and an added optional column reaching Iceberg and Trino. **Validated** in a manual rehearsal on 2026-11-02, together with the live source (`make new-source`, then Tableflow on `pg_stores`).

@@ -322,7 +322,7 @@ Rules from the Confluent CDC guidance:
 - The CDC topic appears in Flink automatically (no source DDL). Do not set connector/format/bootstrap options on `CREATE TABLE`.
 - Create the target with `changelog.mode = 'upsert'` **from the start**. It is immutable after the first materialization.
 - Do not enable Tableflow directly on `mysql.shop.customers`: the topic is not compacted, so Tableflow would use append mode and the delete tombstones would suspend the table; dotted names also fail through Polaris. (Postgres avoids both with the compacted, renamed topic.)
-- Whether deletes reach the Iceberg table through this decode is not confirmed (verify with the delete in `make demo-changes`).
+- Deletes reach the Iceberg table through this decode (validated in a manual rehearsal, 2026-11-02).
 
 ### D5. Enable Tableflow on the decoded topic
 
@@ -330,13 +330,13 @@ Rules from the Confluent CDC guidance:
 make tableflow-cdc TOPICS=mysql_customers
 ```
 
-**Checkpoint D**: after the first commit with data, `make query TABLE=mysql_customers`. Right after enabling Tableflow the table already exists in Polaris but is empty (two snapshots without rows); the first commit with rows can take 5 to 15 minutes on a low-volume topic. Then:
+**Checkpoint D**: after the first commit with data, `make query TABLE=mysql_customers`. Right after enabling Tableflow the table already exists in Polaris but is empty (two snapshots without rows); the first commit with rows took 5 to 10 minutes in rehearsal (up to 15 is possible on a low-volume topic). Then:
 
 ```bash
 make demo-changes
 ```
 
-After the next Tableflow commit (a few minutes) id=2 shows `gold`, Zoe is present, and id=5 should be gone (verify).
+After the next Tableflow commit (a few minutes) id=2 shows `gold`, Zoe is present, and id=5 is gone (validated in rehearsal).
 
 ---
 
@@ -369,7 +369,7 @@ Rules for the column (Tableflow's schema evolution): add **optional** (nullable)
 
 The same `ALTER` on MySQL would **not** reach `mysql_customers`: a Flink statement keeps the schema it had when it was created. That is the trade-off to explain: Flink adds transformation and enrichment, the direct path adds hands-off schema evolution.
 
-Not verified end to end: Tableflow upsert on the Debezium topic (including deletes through tombstones) and the new column reaching Iceberg and Trino with these component versions (Debezium 2.7.4, Avro). If Tableflow suspends the table, check its status message and the schema versions of `pg_products-value` in Schema Registry.
+Validated in a manual rehearsal on 2026-11-02: Tableflow upsert on the Debezium topic, deletes through tombstones, and the new column reaching Iceberg and Trino (Debezium 2.7.4, Avro); each change showed up within 5 to 10 minutes. If Tableflow suspends the table, check its status message and the schema versions of `pg_products-value` in Schema Registry.
 
 ### E2. A new source created live, then Tableflow
 
@@ -391,9 +391,9 @@ confluent tableflow topic enable pg_stores --cluster $CLUSTER_ID --environment $
 # same thing: make tableflow-cdc TOPICS=pg_stores
 ```
 
-The table appears in Polaris right away (empty) and gets its rows at the first Tableflow commit, 5 to 15 minutes later, so do this early in the demo and show the result at the end (Act 8).
+The table appears in Polaris right away (empty) and gets its rows at the first Tableflow commit, 5 to 10 minutes later in rehearsal (up to 15 is possible), so do this early in the demo and show the result at the end (Act 8).
 
-**Repeating it.** `make new-source-down` removes the connector, slot, publication and table, and prints the Confluent commands (disable Tableflow, delete the topic and the `pg_stores-*` subjects) that you run yourself; wait for Tableflow to finish cleaning up before enabling it again (re-enabling too early can be refused). Debezium keeps offsets per connector name, so the second run needs another name: `CONNECTOR=postgres-stores-cdc-shop2 make new-source`. Not rehearsed end to end.
+**Repeating it.** `make new-source-down` removes the connector, slot, publication and table, and prints the Confluent commands (disable Tableflow, delete the topic and the `pg_stores-*` subjects) that you run yourself; wait for Tableflow to finish cleaning up before enabling it again (re-enabling too early can be refused). Debezium keeps offsets per connector name, so the second run needs another name: `CONNECTOR=postgres-stores-cdc-shop2 make new-source`. The first run (`make new-source` and enabling Tableflow) was validated in rehearsal on 2026-11-02; `new-source-down` and the repeat with a second connector name were **not** rehearsed.
 
 ---
 

@@ -83,7 +83,7 @@ confluent tableflow topic enable pg_stores --cluster $CLUSTER_ID --environment $
   --storage-type BYOS --provider-integration $PI_ID --bucket-name $BUCKET --table-formats ICEBERG
 ```
 
-The first commit with rows takes 5 to 15 minutes, so **do this early** and come back to it in Act 8. Nothing of this exists before the demo (see the pre-flight list).
+The first commit with rows took 5 to 10 minutes in rehearsal (up to 15 is possible), so **do this early** and come back to it in Act 8. Nothing of this exists before the demo (see the pre-flight list).
 
 **Point:** open format, customer-owned storage. Events use append mode, the CDC topics use upsert.
 
@@ -138,10 +138,10 @@ Expected: `Access Denied: Cannot create table`.
    make demo-changes
    ```
    MySQL: Luc Martin becomes `gold`, Mia Rossi (id 5) is deleted, Zoe Lind is added. Postgres: SKU-A stock drops by 5 and SKU-E is added.
-2. Go on with Act 7 while Tableflow commits (a few minutes; the first commit with rows on a quiet topic can take longer).
+2. Go on with Act 7 while Tableflow commits (5 to 10 minutes in rehearsal; the first commit with rows on a quiet topic can take longer).
 3. Re-run the two CDC queries from Act 4 and the order query from Act 3. Orders keep growing because the producer is still running.
 
-**Point:** changes flow from the database to the table with no job to schedule. **Rehearse the delete:** that a delete reaches the Iceberg table (through the Flink upsert for MySQL, through the tombstone for Postgres) is not yet confirmed. If it does not, present updates and inserts, and say so.
+**Point:** changes flow from the database to the table with no job to schedule. **Rehearsed (2026-11-02):** deletes reach the Iceberg table on both paths, through the Flink upsert for MySQL and through the tombstone for Postgres. Allow the same 5 to 10 minutes as for updates and inserts.
 
 If you cannot wait: run `make demo-changes` 15 minutes before the demo and treat this act as "here is the result".
 
@@ -156,7 +156,7 @@ If you cannot wait: run `make demo-changes` 15 minutes before the demo and treat
    It runs `ALTER TABLE products ADD COLUMN category TEXT` on Postgres and updates two rows (Postgres announces a new column with the next row change).
 2. After the next Tableflow commit, re-run the Postgres query from Act 4 in Trino: `SELECT * FROM "lkc-xxxxx".pg_products ORDER BY id;`. The new `category` column is there, `tools` for SKU-A and SKU-B and `NULL` for the rest. Polaris needed no refresh.
 
-**Point:** Debezium registers the new schema version, Tableflow adds the column to the Iceberg table, and Polaris serves the new schema right away. **Be honest about the edges:** only optional columns can be added (drop, rename, reorder and `NOT NULL` columns are rejected), and the MySQL path through Flink would not pick the column up by itself, because a Flink statement keeps the schema it was created with. That is the trade-off between the two paths. Repeating the act needs a new column name (`make demo-ddl COLUMN=origin`); to start over, rebuild the `pg_products` table (see Reset). **Not rehearsed yet: do it once before presenting.**
+**Point:** Debezium registers the new schema version, Tableflow adds the column to the Iceberg table, and Polaris serves the new schema right away. **Be honest about the edges:** only optional columns can be added (drop, rename, reorder and `NOT NULL` columns are rejected), and the MySQL path through Flink would not pick the column up by itself, because a Flink statement keeps the schema it was created with. That is the trade-off between the two paths. Repeating the act needs a new column name (`make demo-ddl COLUMN=origin`); to start over, rebuild the `pg_products` table (see Reset). **Rehearsed (2026-11-02):** the column reached Trino within 5 to 10 minutes of `make demo-ddl`.
 
 ### Act 8. Close (1 min)
 
@@ -167,7 +167,7 @@ SHOW TABLES FROM "lkc-xxxxx";                              -- pg_stores is liste
 SELECT * FROM "lkc-xxxxx".pg_stores ORDER BY id;           -- 3 stores once the first commit is done
 ```
 
-If the rows are not there yet, show that the table exists and say the first commit is still pending. Not rehearsed end to end for `pg_stores`.
+If the rows are not there yet, show that the table exists and say the first commit is still pending. Rehearsed end to end on 2026-11-02 (rows visible after the first commit, 5 to 10 minutes).
 
 ## Likely questions
 
@@ -175,7 +175,7 @@ If the rows are not there yet, show that the table exists and say the first comm
 |----------|--------|
 | Why Polaris if Tableflow already has a REST catalog? | Customers that standardize on their own catalog want one governed entry point for all engines. For BYOS tables, Tableflow's catalog does not vend storage credentials, so Polaris does, and engines never get bucket access. |
 | Is the data copied? | No. Tableflow writes Iceberg to the customer's bucket; engines read it there. Polaris only holds catalog state. |
-| How fresh is it? | One Tableflow commit behind (a few minutes). No sync job in between. |
+| How fresh is it? | One Tableflow commit behind: 5 to 10 minutes in our rehearsals (Tableflow targets about 5, up to 15 on quiet topics). No sync job in between. |
 | Can engines write? | No. Tableflow's catalog advertises read endpoints only, and the demo principal is read-only. |
 | Why not Tableflow's push sync to Polaris? | It is not available for open-source Polaris yet (INIT-10332). Federation is what works today. |
 | Does it work with private networking? | Not today with Polaris or catalog integrations. |
